@@ -12,29 +12,35 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const USERNAME = (
   process.env.TIKTOK_USERNAME || "mini.ev.makassar"
-).replace("@", "");
+).replace(/^@/, "");
 
-let connection = null;
+app.use(express.static("public"));
+
+let connection;
 let live = false;
-let checking = false;
 let connecting = false;
+let checking = false;
 
 function broadcast(data) {
-  const message = JSON.stringify(data);
+  const msg = JSON.stringify(data);
 
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+      client.send(msg);
     }
   });
 }
 
-app.get("/", (req, res) => {
-  res.send("LIVE Comment Reader Server is running");
-});
+function status() {
+  broadcast({
+    type: "status",
+    live,
+    username: USERNAME
+  });
+}
 
 app.get("/status", (req, res) => {
   res.json({
@@ -52,54 +58,42 @@ wss.on("connection", socket => {
   }));
 });
 
-async function connectToLive() {
-  if (connecting || connection?.isConnected) return;
+function setupConnection() {
+  if (connection) return;
 
-  connecting = true;
+  connection = new TikTokLiveConnection(USERNAME);
 
-  try {
-    connection = new TikTokLiveConnection(USERNAME);
+  connection.on(ControlEvent.CONNECTED, () => {
+    live = true;
+    console.log("LIVE terhubung");
+    status();
+  });
 
-    connection.on(ControlEvent.CONNECTED, () => {
-      live = true;
-      broadcast({ type: "status", live: true });
-      console.log("TikTok LIVE terhubung");
-    });
-
-    connection.on(WebcastEvent.CHAT, data => {
-      const comment = {
-        type: "comment",
-        username:
-          data.user?.nickname ||
-          data.user?.uniqueId ||
-          "Penonton",
-        text: data.comment || ""
-      };
-
-      if (comment.text.trim()) {
-        broadcast(comment);
-        console.log(comment.username + ": " + comment.text);
-      }
-    });
-
-    connection.on(ControlEvent.DISCONNECTED, () => {
-      console.log("Koneksi LIVE terputus");
-    });
-
-    connection.on(ControlEvent.ERROR, error => {
-      console.error("TikTok error:", error);
-    });
-
-    await connection.connect();
-
-  } catch (error) {
-    console.error("Gagal menghubungkan:", error.message);
+  connection.on(ControlEvent.DISCONNECTED, () => {
     live = false;
-    broadcast({ type: "status", live: false });
-    connection = null;
-  } finally {
-    connecting = false;
-  }
+    console.log("LIVE terputus");
+    status();
+  });
+
+  connection.on(ControlEvent.ERROR, error => {
+    console.error("TikTok:", error);
+  });
+
+  connection.on(WebcastEvent.CHAT, data => {
+    const comment = {
+      type: "comment",
+      username:
+        data.user?.nickname ||
+        data.user?.uniqueId ||
+        "Penonton",
+      text: data.comment || ""
+    };
+
+    if (comment.text.trim()) {
+      broadcast(comment);
+      console.log(comment.username, comment.text);
+    }
+  });
 }
 
 async function checkLive() {
@@ -107,35 +101,38 @@ async function checkLive() {
   checking = true;
 
   try {
-    if (!connection) {
-      connection = new TikTokLiveConnection(USERNAME);
-    }
+    setupConnection();
 
     const isLive = await connection.fetchIsLive();
 
-    if (isLive && !connection.isConnected) {
-      await connectToLive();
+    if (isLive && !connection.isConnected && !connecting) {
+      connecting = true;
+
+      try {
+        await connection.connect();
+      } finally {
+        connecting = false;
+      }
     }
 
     if (!isLive && connection.isConnected) {
       await connection.disconnect();
-      live = false;
-      broadcast({ type: "status", live: false });
     }
 
-    if (!isLive) {
+    if (!isLive && live) {
       live = false;
+      status();
     }
 
   } catch (error) {
-    console.error("Pengecekan LIVE gagal:", error.message);
+    console.error("Pengecekan LIVE:", error.message);
   } finally {
     checking = false;
   }
 }
 
-server.listen(PORT, () => {
-  console.log("Server berjalan pada port " + PORT);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log("Server berjalan di port", PORT);
   console.log("Memantau @" + USERNAME);
 
   checkLive();
